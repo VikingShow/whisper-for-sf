@@ -139,7 +139,7 @@ class Config:
             '--format',
             type=str,
             default='docx',
-            help='输出格式: docx, txt, srt 或多个用逗号分隔 (默认: docx)'
+            help='输出格式: docx, txt, md(markdown), srt 或多个用逗号分隔 (默认: docx)'
         )
         
         parser.add_argument(
@@ -206,9 +206,9 @@ class Config:
             if not os.path.isdir(self.audio_dir):
                 raise ValueError(f"不是有效的目录: {self.audio_dir}")
         
-        # 验证输出格式
-        valid_formats = ['docx', 'txt', 'srt']
-        formats = [f.strip() for f in self.output_format.split(',')]
+        # 验证输出格式（支持别名）
+        valid_formats = ['docx', 'txt', 'srt', 'md', 'markdown']
+        formats = [f.strip().lower() for f in self.output_format.split(',')]
         for fmt in formats:
             if fmt not in valid_formats:
                 raise ValueError(f"不支持的输出格式: {fmt}，支持的格式: {', '.join(valid_formats)}")

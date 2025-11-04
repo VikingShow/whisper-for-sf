@@ -151,6 +151,39 @@ class SrtFormatter(BaseFormatter):
             raise
 
 
+class MarkdownFormatter(BaseFormatter):
+    """Markdown 文本格式化器"""
+    
+    def format(self, segments: List[Tuple[float, float, str]], output_path: str) -> None:
+        """
+        生成 Markdown 文件
+        
+        Args:
+            segments: 片段列表 [(start_time, end_time, text), ...]
+            output_path: 输出文件路径
+        """
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                # 标题
+                f.write(f"# {self.title}\n\n")
+                
+                # 元数据
+                total_duration = segments[-1][1] if segments else 0
+                f.write(f"> 总时长: {format_time(total_duration)}  ")
+                f.write(f"段落数: {len(segments)}\n\n")
+                f.write("---\n\n")
+                
+                # 内容
+                for i, (start, end, text) in enumerate(segments, 1):
+                    f.write(f"## 第 {i} 段 ({format_time(start)} → {format_time(end)})\n\n")
+                    f.write(f"{text}\n\n")
+            
+            logger.info(f"已保存 Markdown 文件: {output_path}")
+        except Exception as e:
+            logger.error(f"生成 Markdown 文件失败: {e}")
+            raise
+
+
 class FormatterFactory:
     """格式化器工厂"""
     
@@ -158,6 +191,8 @@ class FormatterFactory:
         'docx': DocxFormatter,
         'txt': TxtFormatter,
         'srt': SrtFormatter,
+        'md': MarkdownFormatter,
+        'markdown': MarkdownFormatter,
     }
     
     @classmethod

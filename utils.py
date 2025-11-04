@@ -345,4 +345,3 @@ def get_relative_output_path(
     
     return str(output_path)
 
-
