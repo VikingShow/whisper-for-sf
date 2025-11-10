@@ -23,6 +23,14 @@ cd whisper
 # 安装依赖
 pip install -r requirements.txt
 
+pip install --upgrade pip
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121  # 确保与本机CUDA版本匹配
+pip install transformers datasets accelerate peft soundfile ffmpeg-python pydub jiwer tqdm
+pip install git+https://github.com/openai/whisper.git  # 用于初步转录/工具
+pip install faster-whisper
+pip install gradio fastapi uvicorn python-multipart
+pip install opencc
+pip install python-docx
 # 可选：安装 GPU 支持（推荐）
 pip install torch --index-url https://download.pytorch.org/whl/cu118
 ```

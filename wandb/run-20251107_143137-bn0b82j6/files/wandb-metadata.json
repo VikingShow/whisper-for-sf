@@ -1,0 +1,40 @@
+{
+  "os": "Windows-10-10.0.26100-SP0",
+  "python": "CPython 3.10.19",
+  "startedAt": "2025-11-07T06:31:37.884970Z",
+  "program": "C:\\Users\\SowrJam\\workspace\\whisper\\train_lora_large_v3.py",
+  "codePath": "train_lora_large_v3.py",
+  "codePathLocal": "train_lora_large_v3.py",
+  "git": {
+    "remote": "git@github.com:VikingShow/whisper-for-sf.git",
+    "commit": "fb862268f6ba5acf4198ed4efbf4069dc01cb421"
+  },
+  "email": "2678907515@qq.com",
+  "root": "C:\\Users\\SowrJam\\workspace\\whisper",
+  "host": "SowROG",
+  "executable": "C:\\Users\\SowrJam\\AppData\\Local\\conda\\conda\\envs\\whisper\\python.exe",
+  "cpu_count": 24,
+  "cpu_count_logical": 32,
+  "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "1023254982656",
+      "used": "641008201728"
+    }
+  },
+  "memory": {
+    "total": "33954398208"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 4060 Laptop GPU",
+      "memoryTotal": "8585740288",
+      "cudaCores": 3072,
+      "architecture": "Ada",
+      "uuid": "GPU-31edb24a-5bfa-136b-4165-09be7122dfa3"
+    }
+  ],
+  "cudaVersion": "12.9",
+  "writerId": "lcutf3a0ni9m8w8myy5du5tmywy45xn6"
+}
