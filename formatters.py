@@ -60,7 +60,7 @@ class DocxFormatter(BaseFormatter):
             meta.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
             
             # 添加分隔线
-            doc.add_paragraph("─" * 50)
+            # doc.add_paragraph("─" * 50)
             
             # 添加各个片段
             for i, (start, end, text) in enumerate(segments, 1):

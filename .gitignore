@@ -46,6 +46,9 @@ venv.bak/
 *.docx
 *.txt
 *.srt
+!requirements.txt
+!requirements.api.txt
+
 
 # 音频文件（可选：如果不想提交音频文件）
 *.mp3
@@ -81,4 +84,12 @@ tmp/
 *.bak
 *.backup
 
+# ct2
+ct2_finetuned_model/
+qlora_out/
+dataset/
 
+audio/
+
+# Weights & Biases outputs
+wandb/

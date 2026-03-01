@@ -42,36 +42,29 @@ class TranscriptionPipeline:
         self.config = config
         self.model: Optional[WhisperModel] = None
         self.converter = OpenCC("t2s")  # 繁体转简体
-        # 多人语音（说话人分离）
-        self.diarization_pipeline = None
         
     def __enter__(self) -> 'TranscriptionPipeline':
-        """上下文管理器入口"""
-        logger.info(f"正在加载模型: {self.config.model_size}")
+        """上下文管理器入口 (推荐的灵活版本)"""
+        
+        # self.config.model_size 将是 "large-v3" 或 "./ct2_finetuned_model"
+        model_path_or_name = self.config.model_size
+        
+        # 检查它是否是一个本地文件夹路径
+        if os.path.isdir(model_path_or_name):
+            logger.info(f"正在加载本地微调模型: {model_path_or_name}")
+        else:
+            logger.info(f"正在加载预训练模型: {model_path_or_name}")
+            
         try:
             self.model = WhisperModel(
-                self.config.model_size,
+                model_path_or_name,  # <-- 使用 config 中的值
                 device=self.config.device,
                 compute_type=self.config.compute_type
             )
             logger.info("模型加载成功")
-
-            # 如配置启用多人语音，则初始化说话人分离管道
-            if getattr(self.config, "enable_diarization", False):
-                try:
-                    from faster_whisper.diarization import DiarizationPipeline  # type: ignore
-                    self.diarization_pipeline = DiarizationPipeline(
-                        self.config.diarization_model,
-                        device=self.config.device,
-                    )
-                    logger.info(f"已初始化说话人分离模型: {self.config.diarization_model}")
-                except Exception as e:
-                    logger.error(f"无法启用多人语音说话人分离: {e}")
-                    logger.error("将以单说话人模式继续转写，如需多人语音请检查 faster-whisper 版本和 pyannote 模型配置")
-                    self.diarization_pipeline = None
-                    self.config.enable_diarization = False
         except Exception as e:
             logger.error(f"模型加载失败: {e}")
+            logger.error("如果这是微调模型，请确保您已将其转换为 CTranslate2 格式，并且文件夹中包含了 preprocessor_config.json 等文件。")
             raise
         return self
     
@@ -89,11 +82,8 @@ class TranscriptionPipeline:
         Returns:
             (合并后的片段列表, 转写信息)
         """
-        # 仅在未启用说话人分离时使用缓存，避免不同配置共用结果
-        use_cache = self.config.use_cache and not getattr(self.config, "enable_diarization", False)
-
         # 检查缓存
-        if use_cache:
+        if self.config.use_cache:
             cache_path = get_cache_path(self.config.audio_file, self.config.model_size)
             cached_data = load_from_cache(cache_path)
             if cached_data:
@@ -114,7 +104,7 @@ class TranscriptionPipeline:
         logger.info(f"共生成 {len(merged_segments)} 个片段")
         
         # 保存到缓存
-        if use_cache:
+        if self.config.use_cache:
             cache_data = (merged_segments, info)
             save_to_cache(cache_path, cache_data)
         
@@ -135,9 +125,6 @@ class TranscriptionPipeline:
             'audio': self.config.audio_file,
             'beam_size': self.config.beam_size,
             'language': self.config.language,
-            'condition_on_previous_text': False,  # 防止前文错误传染后文
-            'no_speech_threshold': 0.8,          # 提高“无语音”判断阈值
-            'compression_ratio_threshold': 2.0,  # 过滤可疑乱码/重复
         }
         
         # 启用 VAD（语音活动检测）
@@ -148,23 +135,10 @@ class TranscriptionPipeline:
                 'speech_pad_ms': 400,
             }
             logger.debug("已启用 VAD 过滤")
-
-        # 启用说话人分离（如果支持）
-        if getattr(self.config, "enable_diarization", False) and self.diarization_pipeline is not None:
-            transcribe_params['diarization'] = self.diarization_pipeline
         
         try:
             segments, info = self.model.transcribe(**transcribe_params)
             return segments, info
-        except TypeError as e:
-            # 当前 faster-whisper 版本不支持 diarization 参数，回退到普通模式
-            if 'diarization' in transcribe_params and 'unexpected keyword argument' in str(e):
-                logger.warning("当前 faster-whisper 不支持 'diarization' 参数，将关闭多人语音说话人分离")
-                transcribe_params.pop('diarization', None)
-                self.config.enable_diarization = False
-                segments, info = self.model.transcribe(**transcribe_params)
-                return segments, info
-            raise
         except Exception as e:
             logger.error(f"转写失败: {e}")
             raise
@@ -182,83 +156,41 @@ class TranscriptionPipeline:
         Returns:
             合并后的片段列表 [(start_time, end_time, text), ...]
         """
-        merged_segments: List[Tuple[float, float, str]] = []
+        merged_segments = []
         temp_text = ""
         temp_start: Optional[float] = None
         temp_end: Optional[float] = None
-        temp_speaker: Optional[str] = None
         
         # 使用进度条
         with tqdm(desc="处理音频片段", unit="段") as pbar:
             for seg in segments:
                 # 繁体转简体
                 text = self.converter.convert(seg.text.strip())
-                speaker = getattr(seg, "speaker", None)
                 
                 # 清理和优化文本
                 text = clean_text(text)
                 text = add_basic_punctuation(text)
-
-                # 初始化起始时间和说话人
+                
+                # 初始化起始时间
                 if temp_start is None:
                     temp_start = seg.start
-                    temp_speaker = speaker
-
-                same_speaker = (not getattr(self.config, "enable_diarization", False)) or (speaker == temp_speaker)
-
-                # 如果说话人变更，先冻结上一段
-                if getattr(self.config, "enable_diarization", False) and not same_speaker:
-                    merged_segments.append(
-                        (temp_start, temp_end if temp_end is not None else seg.start, self._format_segment_text(temp_text, temp_speaker))
-                    )
-                    temp_start = seg.start
-                    temp_text = ""
-                    temp_speaker = speaker
-
+                
                 temp_end = seg.end
                 temp_text += text
-
+                
                 # 根据设置的段长合并
                 if temp_end - temp_start >= self.config.segment_length:
-                    merged_segments.append(
-                        (temp_start, temp_end, self._format_segment_text(temp_text, temp_speaker))
-                    )
+                    merged_segments.append((temp_start, temp_end, temp_text.strip()))
                     temp_text = ""
                     temp_start = None
                     temp_end = None
-                    temp_speaker = None
                     pbar.update(1)
         
         # 处理剩余文本
         if temp_text:
-            merged_segments.append(
-                (temp_start if temp_start is not None else 0.0,
-                 temp_end if temp_end is not None else 0.0,
-                 self._format_segment_text(temp_text, temp_speaker))
-            )
+            merged_segments.append((temp_start, temp_end, temp_text.strip()))
         
         return merged_segments
-
-    def _format_segment_text(self, text: str, speaker: Optional[str]) -> str:
-        """
-        根据需要在文本开头添加说话人标签，方便 SRT/文档显示多人语音。
-        """
-        clean = text.strip()
-        if not clean:
-            return ""
-
-        if not getattr(self.config, "enable_diarization", False) or not speaker:
-            return clean
-
-        label = speaker
-        if isinstance(speaker, str) and "SPEAKER_" in speaker:
-            try:
-                idx = int(speaker.split("_")[-1])
-                label = f"说话人{idx + 1}"
-            except ValueError:
-                label = speaker
-
-        return f"[{label}] {clean}"
     
     def save_outputs(self, segments: List[Tuple[float, float, str]]) -> List[str]:
         """

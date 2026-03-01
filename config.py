@@ -29,12 +29,15 @@ class Config:
         self.beam_size: int = self.DEFAULT_BEAM_SIZE
         self.output_path: str = ""
         self.output_dir: str = ""  # 批量输出目录
-        self.output_format: str = "docx"  # docx, txt, srt
+        self.output_format: str = "docx,srt"  # docx, txt, srt
         self.use_cache: bool = True
         self.vad_filter: bool = True
         self.log_level: str = "INFO"
         self.recursive: bool = False  # 递归扫描子目录
         self.file_pattern: str = "*"  # 文件匹配模式
+        # 多人语音（说话人分离）
+        self.enable_diarization: bool = False
+        self.diarization_model: str = "pyannote/speaker-diarization"
     
     @classmethod
     def from_args(cls) -> 'Config':
@@ -69,8 +72,7 @@ class Config:
             '--model',
             type=str,
             default=cls.DEFAULT_MODEL_SIZE,
-            choices=['tiny', 'base', 'small', 'medium', 'large-v2', 'large-v3'],
-            help=f'模型大小 (默认: {cls.DEFAULT_MODEL_SIZE})'
+            help="模型名称 (如 'large-v3') 或本地 CTranslate2 模型的路径"
         )
         
         parser.add_argument(
@@ -138,8 +140,8 @@ class Config:
         parser.add_argument(
             '--format',
             type=str,
-            default='docx',
-            help='输出格式: docx, txt, md(markdown), srt 或多个用逗号分隔 (默认: docx)'
+            default='docx,srt',
+            help='输出格式: docx, txt, md(markdown), srt 或多个用逗号分隔 (默认: docx,srt)'
         )
         
         parser.add_argument(
@@ -160,6 +162,19 @@ class Config:
             default='INFO',
             choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
             help='日志级别 (默认: INFO)'
+        )
+
+        parser.add_argument(
+            '--diarization',
+            action='store_true',
+            help='启用多人语音说话人分离（需要 faster-whisper 的说话人分离依赖）'
+        )
+
+        parser.add_argument(
+            '--diarization-model',
+            type=str,
+            default='pyannote/speaker-diarization',
+            help='说话人分离模型名称或路径 (默认: pyannote/speaker-diarization)'
         )
         
         args = parser.parse_args()
@@ -182,6 +197,8 @@ class Config:
         config.log_level = args.log_level
         config.recursive = args.recursive
         config.file_pattern = args.pattern
+        config.enable_diarization = args.diarization
+        config.diarization_model = args.diarization_model
         
         return config
     
@@ -235,6 +252,8 @@ class Config:
             'vad_filter': self.vad_filter,
             'recursive': self.recursive,
             'file_pattern': self.file_pattern,
+            'enable_diarization': self.enable_diarization,
+            'diarization_model': self.diarization_model,
         }
 
 
