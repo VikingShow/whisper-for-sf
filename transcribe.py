@@ -5,7 +5,11 @@ Whisper 音频转写工具
 import os
 import time
 import logging
-from typing import List, Tuple, Iterator, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from dotenv import load_dotenv
+load_dotenv()
+from typing import Dict, List, Tuple, Iterator, Optional
 from faster_whisper import WhisperModel
 from opencc import OpenCC
 from tqdm import tqdm
@@ -24,6 +28,7 @@ from utils import (
     get_relative_output_path,
 )
 from formatters import FormatterFactory
+from llm_polish import polish_segments_with_llm
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -195,9 +200,10 @@ class TranscriptionPipeline:
                 text = self.converter.convert(seg.text.strip())
                 speaker = getattr(seg, "speaker", None)
                 
-                # 清理和优化文本
+                # 清理文本；开启 LLM 润色时不预加标点，交由 LLM 处理
                 text = clean_text(text)
-                text = add_basic_punctuation(text)
+                if not getattr(self.config, "llm_polish", False):
+                    text = add_basic_punctuation(text)
 
                 # 初始化起始时间和说话人
                 if temp_start is None:
@@ -259,6 +265,54 @@ class TranscriptionPipeline:
                 label = speaker
 
         return f"[{label}] {clean}"
+
+    def _get_formatter_options(self) -> dict:
+        """构建格式化器选项（当前主要用于 DOCX 模板化导出）。"""
+        return {
+            "docx_template": getattr(self.config, "docx_template", ""),
+            "docx_prose_style": getattr(self.config, "docx_prose_style", ""),
+            "docx_verse_style": getattr(self.config, "docx_verse_style", ""),
+            "docx_add_timestamps": getattr(self.config, "docx_add_timestamps", False),
+            "docx_margin_top_cm": getattr(self.config, "docx_margin_top_cm", 2.54),
+            "docx_margin_bottom_cm": getattr(self.config, "docx_margin_bottom_cm", 2.54),
+            "docx_margin_left_cm": getattr(self.config, "docx_margin_left_cm", 3.18),
+            "docx_margin_right_cm": getattr(self.config, "docx_margin_right_cm", 3.18),
+        }
+
+    def get_output_segments_for_formats(
+        self,
+        segments: List[Tuple[float, float, str]],
+        formats: List[str],
+    ) -> Dict[str, List[Tuple[float, float, str]]]:
+        """
+        根据格式准备导出文本：
+        - srt 保持原始文本
+        - docx/txt/md 可选 LLM 润色
+        """
+        normalized_formats = [fmt.strip().lower() for fmt in formats]
+        need_polish = any(fmt in {"docx", "txt", "md", "markdown"} for fmt in normalized_formats)
+        polished = segments
+        if need_polish:
+            polished = polish_segments_with_llm(
+                segments,
+                enabled=bool(getattr(self.config, "llm_polish", False)),
+                model=str(getattr(self.config, "llm_model", "claude-opus-4-6")),
+                base_url=str(getattr(self.config, "llm_base_url", "https://api.bltcy.ai/v1")),
+                timeout_seconds=int(getattr(self.config, "llm_timeout", 180)),
+                api_key_env=str(getattr(self.config, "llm_api_key_env", "OPENAI_API_KEY")),
+                chunk_chars=int(getattr(self.config, "llm_chunk_chars", 3000)),
+                search_model=str(getattr(self.config, "llm_search_model", "gpt-4o-all")),
+                search_base_url=str(getattr(self.config, "llm_search_base_url", "")),
+                search_api_key_env=str(getattr(self.config, "llm_search_api_key_env", "")),
+            )
+
+        output_map: Dict[str, List[Tuple[float, float, str]]] = {}
+        for fmt in normalized_formats:
+            if fmt == "srt":
+                output_map[fmt] = segments
+            else:
+                output_map[fmt] = polished
+        return output_map
     
     def save_outputs(self, segments: List[Tuple[float, float, str]]) -> List[str]:
         """
@@ -275,6 +329,7 @@ class TranscriptionPipeline:
         
         # 解析输出格式
         formats = [f.strip() for f in self.config.output_format.split(',')]
+        output_segments_map = self.get_output_segments_for_formats(segments, formats)
         
         for fmt in formats:
             try:
@@ -286,8 +341,12 @@ class TranscriptionPipeline:
                 )
                 
                 # 创建格式化器并保存
-                formatter = FormatterFactory.create(fmt, base_name)
-                formatter.format(segments, output_path)
+                formatter = FormatterFactory.create(
+                    fmt,
+                    base_name,
+                    options=self._get_formatter_options(),
+                )
+                formatter.format(output_segments_map.get(fmt.lower(), segments), output_path)
                 
                 output_files.append(output_path)
                 
@@ -353,6 +412,49 @@ def process_single_file(config: Config) -> None:
     logger.info("=" * 60)
 
 
+def _polish_and_save_one_file(
+    segments: List[Tuple[float, float, str]],
+    audio_file: str,
+    audio_dir: str,
+    output_dir: str,
+    output_format: str,
+    pipeline: 'TranscriptionPipeline',
+) -> Dict:
+    """
+    在后台线程中执行 LLM 润色 + 保存所有输出格式。
+
+    Returns:
+        {'file': str, 'output_files': [str, ...], 'elapsed_time': float}
+    """
+    file_start = time.time()
+    output_files: List[str] = []
+    formats = [f.strip() for f in output_format.split(',')]
+
+    output_segments_map = pipeline.get_output_segments_for_formats(segments, formats)
+
+    for fmt in formats:
+        output_path = get_relative_output_path(
+            audio_file, audio_dir, output_dir, fmt
+        )
+        formatter = FormatterFactory.create(
+            fmt,
+            os.path.splitext(os.path.basename(audio_file))[0],
+            options=pipeline._get_formatter_options(),
+        )
+        formatter.format(
+            output_segments_map.get(fmt.lower(), segments), output_path
+        )
+        output_files.append(output_path)
+        logger.debug("  Saved: %s", output_path)
+
+    elapsed = time.time() - file_start
+    return {
+        'file': audio_file,
+        'output_files': output_files,
+        'elapsed_time': elapsed,
+    }
+
+
 def process_batch(config: Config) -> None:
     """批量处理多个文件"""
     # 查找音频文件
@@ -386,70 +488,169 @@ def process_batch(config: Config) -> None:
     successful = []
     failed = []
     
+    # 判断是否启用并行润色：需要 llm_polish 开启 且 未禁用并行
+    llm_polish_enabled = bool(getattr(config, "llm_polish", False))
+    parallel_enabled = (
+        llm_polish_enabled
+        and bool(getattr(config, "parallel_polish", True))
+    )
+
     # 使用管道处理所有文件（复用模型加载）
     with TranscriptionPipeline(config) as pipeline:
-        for idx, audio_file in enumerate(audio_files, 1):
-            try:
-                logger.info(f"\n{'=' * 60}")
-                logger.info(f"[{idx}/{len(audio_files)}] 处理: {os.path.basename(audio_file)}")
-                logger.info(f"{'=' * 60}")
-                
-                # 临时修改配置的音频文件
-                original_audio_file = config.audio_file
-                original_output_path = config.output_path
-                
-                config.audio_file = audio_file
-                
-                # 如果指定了输出目录，生成相应的输出路径
-                if config.output_dir:
-                    # 为批量模式保留目录结构
-                    config.output_path = ""  # 让 save_outputs 自动处理
-                
-                # 转写
-                file_start_time = time.time()
-                segments, info = pipeline.transcribe()
-                
-                # 保存输出（处理批量输出路径）
-                output_files = []
-                formats = [f.strip() for f in config.output_format.split(',')]
-                
-                for fmt in formats:
-                    output_path = get_relative_output_path(
+        if parallel_enabled:
+            # ============================================================
+            # 并行模式：转录和 LLM 润色流水线并行
+            # ============================================================
+            polish_workers = max(1, int(getattr(config, "parallel_polish_workers", 2)))
+            logger.info("⚡ 并行润色模式，后台线程数: %d", polish_workers)
+
+            polish_futures: Dict = {}
+            results_by_idx: Dict[int, Dict] = {}
+
+            with ThreadPoolExecutor(max_workers=polish_workers) as polish_executor:
+                # --- 生产者阶段：串行转录，提交润色到后台 ---
+                for idx, audio_file in enumerate(audio_files, 1):
+                    logger.info(f"\n{'=' * 60}")
+                    logger.info(f"[{idx}/{len(audio_files)}] 处理: {os.path.basename(audio_file)}")
+                    logger.info(f"{'=' * 60}")
+
+                    try:
+                        original_audio_file = config.audio_file
+                        original_output_path = config.output_path
+                        config.audio_file = audio_file
+                        if config.output_dir:
+                            config.output_path = ""
+
+                        # 转录（主线程，模型不线程安全）
+                        transcribe_start = time.time()
+                        segments, info = pipeline.transcribe()
+                        transcribe_elapsed = time.time() - transcribe_start
+                        logger.info(
+                            "  转录完成 (%s)，提交润色后台任务...",
+                            format_duration(transcribe_elapsed),
+                        )
+
+                        # 提交润色+保存到后台线程池
+                        future = polish_executor.submit(
+                            _polish_and_save_one_file,
+                            segments,
+                            audio_file,
+                            config.audio_dir,
+                            config.output_dir,
+                            config.output_format,
+                            pipeline,
+                        )
+                        polish_futures[future] = {
+                            'idx': idx,
+                            'audio_file': audio_file,
+                            'info': info,
+                            'transcribe_elapsed': transcribe_elapsed,
+                        }
+
+                        # 恢复 config 用于下一轮迭代
+                        config.audio_file = original_audio_file
+                        config.output_path = original_output_path
+
+                    except Exception as e:
+                        logger.error(f"❌ 转录失败: {e}")
+                        failed.append({'file': audio_file, 'error': str(e)})
+                        config.audio_file = original_audio_file
+                        config.output_path = original_output_path
+                        continue
+
+                # --- 消费者阶段：等待所有后台润色完成 ---
+                for future in as_completed(polish_futures):
+                    meta = polish_futures[future]
+                    idx = meta['idx']
+                    audio_file = meta['audio_file']
+                    info = meta['info']
+                    transcribe_elapsed = meta['transcribe_elapsed']
+
+                    try:
+                        result = future.result()
+                        total_elapsed = transcribe_elapsed + result['elapsed_time']
+                        logger.info(
+                            "✅ [%d/%d] 完成 %s (转录 %s, 润色 %s, 总计 %s)",
+                            idx, len(audio_files),
+                            os.path.basename(audio_file),
+                            format_duration(transcribe_elapsed),
+                            format_duration(result['elapsed_time']),
+                            format_duration(total_elapsed),
+                        )
+                        logger.info("   音频时长: %s", format_duration(info.duration))
+                        logger.info(
+                            "   处理速度: %.2fx",
+                            info.duration / total_elapsed if total_elapsed > 0 else 0,
+                        )
+                        results_by_idx[idx] = {
+                            'file': audio_file,
+                            'duration': info.duration,
+                            'elapsed_time': total_elapsed,
+                            'output_files': result['output_files'],
+                        }
+                    except Exception as e:
+                        logger.error(
+                            "❌ [%d/%d] 润色失败: %s - %s",
+                            idx, len(audio_files),
+                            os.path.basename(audio_file), e,
+                        )
+                        failed.append({'file': audio_file, 'error': str(e)})
+
+            # 按原始顺序重建成功列表
+            for idx in sorted(results_by_idx):
+                successful.append(results_by_idx[idx])
+
+        else:
+            # ============================================================
+            # 串行模式：转录 → 润色 → 保存（保持原有行为）
+            # ============================================================
+            for idx, audio_file in enumerate(audio_files, 1):
+                try:
+                    logger.info(f"\n{'=' * 60}")
+                    logger.info(f"[{idx}/{len(audio_files)}] 处理: {os.path.basename(audio_file)}")
+                    logger.info(f"{'=' * 60}")
+
+                    original_audio_file = config.audio_file
+                    original_output_path = config.output_path
+
+                    config.audio_file = audio_file
+                    if config.output_dir:
+                        config.output_path = ""
+
+                    # 转录
+                    file_start_time = time.time()
+                    segments, info = pipeline.transcribe()
+
+                    # 润色 + 保存
+                    result = _polish_and_save_one_file(
+                        segments,
                         audio_file,
                         config.audio_dir,
                         config.output_dir,
-                        fmt
+                        config.output_format,
+                        pipeline,
                     )
-                    
-                    formatter = FormatterFactory.create(
-                        fmt,
-                        os.path.splitext(os.path.basename(audio_file))[0]
-                    )
-                    formatter.format(segments, output_path)
-                    output_files.append(output_path)
-                
-                file_elapsed_time = time.time() - file_start_time
-                
-                # 记录成功
-                successful.append({
-                    'file': audio_file,
-                    'duration': info.duration,
-                    'elapsed_time': file_elapsed_time,
-                    'output_files': output_files
-                })
-                
-                logger.info(f"✅ 完成 ({format_duration(file_elapsed_time)})")
-                logger.info(f"   音频时长: {format_duration(info.duration)}")
-                logger.info(f"   处理速度: {info.duration / file_elapsed_time:.2f}x")
-                
-                # 恢复配置
-                config.audio_file = original_audio_file
-                config.output_path = original_output_path
-                
-            except Exception as e:
-                logger.error(f"❌ 处理失败: {e}")
-                failed.append({'file': audio_file, 'error': str(e)})
-                continue
+
+                    file_elapsed_time = time.time() - file_start_time
+
+                    successful.append({
+                        'file': audio_file,
+                        'duration': info.duration,
+                        'elapsed_time': file_elapsed_time,
+                        'output_files': result['output_files'],
+                    })
+
+                    logger.info(f"✅ 完成 ({format_duration(file_elapsed_time)})")
+                    logger.info(f"   音频时长: {format_duration(info.duration)}")
+                    logger.info(f"   处理速度: {info.duration / file_elapsed_time:.2f}x")
+
+                    config.audio_file = original_audio_file
+                    config.output_path = original_output_path
+
+                except Exception as e:
+                    logger.error(f"❌ 处理失败: {e}")
+                    failed.append({'file': audio_file, 'error': str(e)})
+                    continue
     
     # 总结报告
     total_elapsed_time = time.time() - total_start_time

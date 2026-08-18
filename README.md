@@ -61,6 +61,24 @@ python transcribe.py --audio path/to/audio.mp3
 python transcribe.py --dir ./audio --recursive --pattern "*.mp3" --format docx,txt,srt
 ```
 
+DOCX 模板化导出（含颂词自动识别）：
+```bash
+python transcribe.py --audio path/to/audio.mp3 --format docx ^
+  --docx-template "C:\\path\\to\\template.docx" ^
+  --docx-verse-style "Body Text" ^
+  --docx-prose-style "Normal" ^
+  --docx-margin-top 2.54 --docx-margin-bottom 2.54 ^
+  --docx-margin-left 3.18 --docx-margin-right 3.18
+```
+
+启用 LLM 润色导出文稿（可选）：
+```bash
+set OPENAI_API_KEY=你的密钥
+python transcribe.py --audio path/to/audio.mp3 --format docx,txt ^
+  --llm-polish --llm-model gpt-5.2 ^
+  --llm-base-url "https://api.bltcy.ai/v1"
+```
+
 ## API 使用（FastAPI）
 
 启动服务：

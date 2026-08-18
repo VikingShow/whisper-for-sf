@@ -93,3 +93,5 @@ audio/
 
 # Weights & Biases outputs
 wandb/
+
+.env

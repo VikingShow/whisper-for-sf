@@ -46,7 +46,7 @@ def format_timestamp(seconds: float, include_ms: bool = True) -> str:
     secs = int(seconds % 60)
     
     if include_ms:
-        milliseconds = int((seconds % 1) * 1000)
+        milliseconds = int(round((seconds % 1) * 1000))
         return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
     else:
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
